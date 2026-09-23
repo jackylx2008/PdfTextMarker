@@ -80,3 +80,27 @@ class ProcessingResult:
             "report_path": str(self.report_path) if self.report_path else None,
             "cancelled": self.cancelled,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class A3SplitFailure:
+    """无法完成 A3 分页处理的 PDF 及原因。"""
+
+    pdf_name: str
+    relative_pdf: str
+    reason: str
+
+
+@dataclass(slots=True)
+class A3SplitResult:
+    """AI 图框识别与 A3 分页工作流结果。"""
+
+    pdf_count: int = 0
+    processed_pdf_count: int = 0
+    output_pdf_count: int = 0
+    source_page_count: int = 0
+    output_page_count: int = 0
+    rotated_page_count: int = 0
+    output_files: list[Path] = field(default_factory=list)
+    failures: list[A3SplitFailure] = field(default_factory=list)
+    cancelled: bool = False

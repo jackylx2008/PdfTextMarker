@@ -12,3 +12,5 @@ tmp/
 common.env
 *.env
 !common.env.example
+assets/*
+!assets/.gitkeep

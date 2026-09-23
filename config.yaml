@@ -28,3 +28,20 @@ flows:
     box_aspect_ratio: 4.0
     box_size: 40.0
     box_scale: 1.0
+
+  a3_split:
+    input_dir: "${PDF_SPLIT_INPUT_DIR:-./output}"
+    output_dir: "${PDF_SPLIT_OUTPUT_DIR:-./output/a3_split}"
+    recursive: true
+    ai_base_url: "${LLAMACPP_BASE_URL:-http://127.0.0.1:8080/v1}"
+    ai_model: "${LLAMACPP_MODEL:-}"
+    ai_api_key: "${LLAMACPP_API_KEY:-}"
+    top_left_reference_image: "${A3_TOP_LEFT_REFERENCE_IMAGE:-./input/识别图纸左上角.png}"
+    bottom_right_reference_image: "${A3_BOTTOM_RIGHT_REFERENCE_IMAGE:-./input/识别图纸右下角.png}"
+    preview_max_pixels: 1600
+    top_left_offset_x_mm: 0.0
+    top_left_offset_y_mm: 0.0
+    bottom_right_offset_x_mm: 0.0
+    bottom_right_offset_y_mm: 0.0
+    overlap_mm: 0.0
+    margin_mm: 5.0

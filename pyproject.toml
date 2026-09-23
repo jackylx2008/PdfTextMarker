@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdf-text-marker"
+version = "0.1.0"
+description = "Mark spreadsheet keywords in searchable PDF files."
+requires-python = ">=3.10"
+dependencies = [
+    "openpyxl>=3.1,<4",
+    "PyMuPDF>=1.24,<2",
+    "PyYAML>=6,<7",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

@@ -1,0 +1,737 @@
+"""PDF 关键词标注桌面工具
+
+用途：
+  通过 Tkinter 图形界面选择 XLSX/CSV 关键词文件、PDF 输入目录和输出目录，
+  配置多个 Excel 工作表/列以及黄色底纹和红色边框，后台执行批量标注。
+
+配置文件：
+  默认读取根目录 config.yaml；common.env 保存本机私有路径并覆盖公开默认值。
+  界面中的修改仅影响当前运行，不会写回配置文件。
+
+可选参数：
+  --config-file   指定公开 YAML 配置文件，默认使用根目录 config.yaml。
+
+示例：
+  python pdf_text_marker_gui.py
+
+输出：
+  有匹配结果的 *_marked.pdf 和 pdf_text_marker_report.html 写入所选输出目录。
+"""
+
+from __future__ import annotations
+
+import argparse
+import platform
+import queue
+import sys
+import threading
+import time
+import tkinter as tk
+from pathlib import Path
+from tkinter import colorchooser, filedialog, messagebox, ttk
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+SRC_DIR = PROJECT_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from logging_config import configure_utf8_stdio, get_logger, setup_logger
+from pdf_text_marker.config_loader import resolve_path
+from pdf_text_marker.context import (
+    AppContext,
+    MarkPdfsSettings,
+    bootstrap_context,
+    color_to_hex,
+    parse_hex_color,
+)
+from pdf_text_marker.flows.mark_pdfs_flow import discover_pdfs, run
+from pdf_text_marker.models import ExcelKeywordSource, ProcessingResult
+from pdf_text_marker.modules.directory_cleaner import (
+    clear_directory_contents,
+    inspect_directory_contents,
+    validate_clear_target,
+)
+from pdf_text_marker.modules.keyword_reader import inspect_keyword_source, read_excel_keywords, read_keywords
+
+
+logger = get_logger(__name__)
+MAX_LOG_LINES = 3000
+
+
+class SourceDialog(tk.Toplevel):
+    """新增或编辑一个 Excel 关键词来源。"""
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        sheets: tuple[str, ...],
+        initial: ExcelKeywordSource | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.title("Excel 关键词来源")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.result: ExcelKeywordSource | None = None
+        self.sheet_var = tk.StringVar(value=initial.sheet_name if initial else (sheets[0] if sheets else ""))
+        self.columns_var = tk.StringVar(value=", ".join(initial.keyword_columns) if initial else "A")
+        self.pdf_column_var = tk.StringVar(value=initial.pdf_name_column or "" if initial else "")
+
+        frame = ttk.Frame(self, padding=14)
+        frame.grid(sticky="nsew")
+        ttk.Label(frame, text="工作表：").grid(row=0, column=0, sticky="e", padx=(0, 8), pady=5)
+        sheet_box = ttk.Combobox(frame, textvariable=self.sheet_var, values=sheets, width=32)
+        sheet_box.grid(row=0, column=1, sticky="ew", pady=5)
+        if sheets:
+            sheet_box.state(["readonly"])
+        ttk.Label(frame, text="关键词列：").grid(row=1, column=0, sticky="e", padx=(0, 8), pady=5)
+        ttk.Entry(frame, textvariable=self.columns_var, width=35).grid(row=1, column=1, sticky="ew", pady=5)
+        ttk.Label(frame, text="多个列用英文逗号分隔，例如 C, E；也可填写不重复的表头名称。", foreground="#667085").grid(
+            row=2, column=1, sticky="w"
+        )
+        ttk.Label(frame, text="PDF 文件名列：").grid(row=3, column=0, sticky="e", padx=(0, 8), pady=5)
+        ttk.Entry(frame, textvariable=self.pdf_column_var, width=35).grid(row=3, column=1, sticky="ew", pady=5)
+        ttk.Label(frame, text="可留空；填写后仅在对应 PDF 中搜索该行关键词。", foreground="#667085").grid(
+            row=4, column=1, sticky="w"
+        )
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=5, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        ttk.Button(buttons, text="确定", command=self._accept).pack(side="left", padx=4)
+        ttk.Button(buttons, text="取消", command=self.destroy).pack(side="left", padx=4)
+        self.bind("<Return>", lambda _event: self._accept())
+        self.bind("<Escape>", lambda _event: self.destroy())
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.grab_set()
+        sheet_box.focus_set()
+
+    def _accept(self) -> None:
+        sheet = self.sheet_var.get().strip()
+        columns = tuple(part.strip() for part in self.columns_var.get().split(",") if part.strip())
+        if not sheet:
+            messagebox.showerror("参数错误", "请输入或选择工作表名称。", parent=self)
+            return
+        if not columns:
+            messagebox.showerror("参数错误", "至少填写一个关键词列。", parent=self)
+            return
+        self.result = ExcelKeywordSource(sheet, columns, self.pdf_column_var.get().strip() or None)
+        self.destroy()
+
+
+class PdfTextMarkerApp:
+    """单窗口 PDF 关键词标注应用。"""
+
+    def __init__(self, root: tk.Tk, context: AppContext) -> None:
+        self.root = root
+        self.context = context
+        self.events: queue.Queue[tuple[object, ...]] = queue.Queue()
+        self.cancel_event = threading.Event()
+        self.worker: threading.Thread | None = None
+        self.started_at = 0.0
+        self.running = False
+        self.closing = False
+        self.available_sheets: tuple[str, ...] = ()
+        self.sources = list(context.mark_pdfs.excel_sources)
+        self.input_widgets: list[tk.Widget] = []
+
+        settings = context.mark_pdfs
+        self.keyword_file_var = tk.StringVar(value=str(settings.keyword_file))
+        self.pdf_dir_var = tk.StringVar(value=str(settings.pdf_dir))
+        self.output_dir_var = tk.StringVar(value=str(settings.output_dir))
+        self.recursive_var = tk.BooleanVar(value=settings.recursive)
+        self.csv_keyword_var = tk.StringVar(value=settings.keyword_column or "")
+        self.csv_pdf_var = tk.StringVar(value=settings.pdf_name_column or "")
+        self.highlight_enabled_var = tk.BooleanVar(value=settings.highlight_enabled)
+        self.highlight_color_var = tk.StringVar(value=color_to_hex(settings.highlight_color))
+        self.highlight_opacity_var = tk.StringVar(value=f"{settings.highlight_opacity:.2f}")
+        self.border_enabled_var = tk.BooleanVar(value=settings.border_enabled)
+        self.border_color_var = tk.StringVar(value=color_to_hex(settings.border_color))
+        self.border_width_var = tk.StringVar(value=f"{settings.border_width:g}")
+        self.box_aspect_ratio_var = tk.StringVar(value=f"{settings.box_aspect_ratio:g}")
+        self.box_size_var = tk.StringVar(value=f"{settings.box_size:g}")
+        self.box_scale_var = tk.StringVar(value=f"{settings.box_scale:g}")
+        self.status_var = tk.StringVar(value="就绪")
+        self.current_var = tk.StringVar(value="等待任务")
+        self.elapsed_var = tk.StringVar(value="00:00:00")
+
+        self._build_window()
+        self._populate_sources()
+        self._append_log("INFO", "配置已加载，界面修改仅影响本次运行。")
+        self.root.after(100, self._poll_events)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _build_window(self) -> None:
+        self.root.title("PDF 关键词标注工具")
+        self.root.geometry("1120x920")
+        self.root.minsize(920, 820)
+        self.root.grid_columnconfigure(0, weight=1)
+        self.root.grid_rowconfigure(0, weight=3, minsize=610)
+        self.root.grid_rowconfigure(1, weight=2, minsize=170)
+
+        notebook = ttk.Notebook(self.root)
+        notebook.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 6))
+        workflow_tab = ttk.Frame(notebook, padding=12)
+        config_tab = ttk.Frame(notebook, padding=18)
+        notebook.add(workflow_tab, text="PDF 关键词标注")
+        notebook.add(config_tab, text="配置说明")
+        self._build_workflow_tab(workflow_tab)
+        self._build_config_tab(config_tab)
+        self._build_log_area()
+        self._build_status_area()
+
+    def _build_workflow_tab(self, parent: ttk.Frame) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+
+        paths = ttk.LabelFrame(parent, text="输入与输出", padding=10)
+        paths.grid(row=0, column=0, sticky="ew")
+        paths.grid_columnconfigure(1, weight=1)
+        self._path_row(paths, 0, "关键词 Excel/CSV：", self.keyword_file_var, self._browse_keyword_file, file_path=True)
+        self._path_row(paths, 1, "PDF 输入目录：", self.pdf_dir_var, self._browse_pdf_dir)
+        self._path_row(paths, 2, "输出目录：", self.output_dir_var, self._browse_output_dir)
+        recursive = ttk.Checkbutton(paths, text="递归搜索子目录中的 PDF", variable=self.recursive_var)
+        recursive.grid(row=3, column=1, sticky="w", pady=(5, 0))
+        clear_output = ttk.Button(paths, text="一键清空输出", command=self._clear_output_directory)
+        clear_output.grid(row=3, column=2, sticky="ew", padx=(8, 0), pady=(5, 0))
+        self.input_widgets.extend((recursive, clear_output))
+
+        source_frame = ttk.LabelFrame(parent, text="关键词来源", padding=10)
+        source_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+        source_frame.grid_columnconfigure(0, weight=1)
+        source_frame.grid_rowconfigure(0, weight=1)
+        self.source_tree = ttk.Treeview(
+            source_frame,
+            columns=("sheet", "columns", "pdf_column"),
+            show="headings",
+            height=3,
+            selectmode="browse",
+        )
+        self.source_tree.heading("sheet", text="Excel Sheet")
+        self.source_tree.heading("columns", text="关键词列")
+        self.source_tree.heading("pdf_column", text="PDF 文件名列（可选）")
+        self.source_tree.column("sheet", width=190, anchor="w")
+        self.source_tree.column("columns", width=250, anchor="w")
+        self.source_tree.column("pdf_column", width=220, anchor="w")
+        self.source_tree.grid(row=0, column=0, sticky="nsew")
+        tree_scroll = ttk.Scrollbar(source_frame, orient="vertical", command=self.source_tree.yview)
+        tree_scroll.grid(row=0, column=1, sticky="ns")
+        self.source_tree.configure(yscrollcommand=tree_scroll.set)
+        self.source_tree.bind("<Double-1>", lambda _event: self._edit_source())
+        source_buttons = ttk.Frame(source_frame)
+        source_buttons.grid(row=1, column=0, sticky="w", pady=(8, 0))
+        for text, command in (
+            ("读取表结构", self._refresh_structure),
+            ("新增来源", self._add_source),
+            ("编辑来源", self._edit_source),
+            ("删除来源", self._remove_source),
+        ):
+            button = ttk.Button(source_buttons, text=text, command=command)
+            button.pack(side="left", padx=(0, 7))
+            self.input_widgets.append(button)
+
+        csv_frame = ttk.Frame(source_frame)
+        csv_frame.grid(row=2, column=0, sticky="ew", pady=(9, 0))
+        ttk.Label(csv_frame, text="CSV 关键词列：").pack(side="left")
+        csv_keyword = ttk.Entry(csv_frame, textvariable=self.csv_keyword_var, width=18)
+        csv_keyword.pack(side="left", padx=(0, 16))
+        ttk.Label(csv_frame, text="CSV PDF 文件名列：").pack(side="left")
+        csv_pdf = ttk.Entry(csv_frame, textvariable=self.csv_pdf_var, width=18)
+        csv_pdf.pack(side="left")
+        ttk.Label(csv_frame, text="（留空时自动寻找 keyword/关键词）", foreground="#667085").pack(side="left", padx=10)
+        self.input_widgets.extend((csv_keyword, csv_pdf))
+
+        appearance = ttk.LabelFrame(parent, text="标注样式", padding=10)
+        appearance.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        highlight_check = ttk.Checkbutton(appearance, text="启用底纹", variable=self.highlight_enabled_var)
+        highlight_check.grid(row=0, column=0, sticky="w", padx=(0, 10))
+        self.highlight_color_button = tk.Button(
+            appearance,
+            textvariable=self.highlight_color_var,
+            command=self._choose_highlight_color,
+            width=9,
+            relief="solid",
+            borderwidth=1,
+        )
+        self.highlight_color_button.grid(row=0, column=1, padx=(0, 20))
+        ttk.Label(appearance, text="透明度：").grid(row=0, column=2)
+        opacity = ttk.Spinbox(appearance, from_=0.05, to=1.0, increment=0.05, textvariable=self.highlight_opacity_var, width=8)
+        opacity.grid(row=0, column=3, padx=(0, 30))
+        border_check = ttk.Checkbutton(appearance, text="启用边框", variable=self.border_enabled_var)
+        border_check.grid(row=0, column=4, sticky="w", padx=(0, 10))
+        self.border_color_button = tk.Button(
+            appearance,
+            textvariable=self.border_color_var,
+            command=self._choose_border_color,
+            width=9,
+            relief="solid",
+            borderwidth=1,
+        )
+        self.border_color_button.grid(row=0, column=5, padx=(0, 20))
+        ttk.Label(appearance, text="线宽：").grid(row=0, column=6)
+        border_width = ttk.Spinbox(appearance, from_=0.25, to=10.0, increment=0.25, textvariable=self.border_width_var, width=8)
+        border_width.grid(row=0, column=7)
+        ttk.Label(appearance, text="长宽比（宽÷高）：").grid(row=1, column=0, sticky="e", pady=(9, 0))
+        aspect_ratio = ttk.Spinbox(
+            appearance, from_=0.1, to=100.0, increment=0.1, textvariable=self.box_aspect_ratio_var, width=8
+        )
+        aspect_ratio.grid(row=1, column=1, sticky="w", pady=(9, 0))
+        ttk.Label(appearance, text="大小（基础宽度/pt）：").grid(row=1, column=2, sticky="e", pady=(9, 0))
+        box_size = ttk.Spinbox(appearance, from_=1.0, to=2000.0, increment=1.0, textvariable=self.box_size_var, width=8)
+        box_size.grid(row=1, column=3, sticky="w", pady=(9, 0))
+        ttk.Label(appearance, text="放大倍数：").grid(row=1, column=4, sticky="e", pady=(9, 0))
+        box_scale = ttk.Spinbox(appearance, from_=0.1, to=100.0, increment=0.1, textvariable=self.box_scale_var, width=8)
+        box_scale.grid(row=1, column=5, sticky="w", pady=(9, 0))
+        ttk.Label(appearance, text="最终宽度 = 大小 × 放大倍数", foreground="#667085").grid(
+            row=1, column=6, columnspan=2, sticky="w", padx=(10, 0), pady=(9, 0)
+        )
+        self.input_widgets.extend(
+            (
+                highlight_check,
+                self.highlight_color_button,
+                opacity,
+                border_check,
+                self.border_color_button,
+                border_width,
+                aspect_ratio,
+                box_size,
+                box_scale,
+            )
+        )
+        self._sync_color_button(self.highlight_color_button, self.highlight_color_var.get())
+        self._sync_color_button(self.border_color_button, self.border_color_var.get())
+
+        actions = ttk.Frame(parent)
+        actions.grid(row=3, column=0, sticky="e", pady=(12, 0))
+        self.preview_button = ttk.Button(actions, text="参数预览", command=self._preview)
+        self.start_button = ttk.Button(actions, text="开始执行", command=self._start)
+        self.cancel_button = ttk.Button(actions, text="取消任务", command=self._cancel)
+        self.preview_button.pack(side="left", padx=5)
+        self.start_button.pack(side="left", padx=5)
+        self.cancel_button.pack(side="left", padx=5)
+        self.cancel_button.state(["disabled"])
+        self.input_widgets.append(self.preview_button)
+
+    def _path_row(
+        self,
+        parent: ttk.Frame,
+        row: int,
+        label: str,
+        variable: tk.StringVar,
+        command,
+        *,
+        file_path: bool = False,
+    ) -> None:
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="e", padx=(0, 8), pady=4)
+        entry = ttk.Entry(parent, textvariable=variable)
+        entry.grid(row=row, column=1, sticky="ew", pady=4)
+        button = ttk.Button(parent, text="浏览文件" if file_path else "浏览目录", command=command)
+        button.grid(row=row, column=2, padx=(8, 0), pady=4)
+        self.input_widgets.extend((entry, button))
+
+    def _build_config_tab(self, parent: ttk.Frame) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+        text = (
+            "配置优先级\n\n"
+            "进程环境变量 > common.env > config.yaml 默认值\n\n"
+            "config.yaml 是可同步的公开配置，只保存通用默认值。\n"
+            "common.env 是本机私有配置，不进行 Git 同步。\n"
+            "界面参数只影响当前任务，不会写回配置文件。\n\n"
+            "关键词规则\n\n"
+            "支持 XLSX 和 CSV；忽略空值并去重。英文和中文冒号及其后的说明会被删除。\n"
+            "Excel 可配置多个 Sheet 和多个列；CSV 可按列名读取。\n\n"
+            "PDF 规则\n\n"
+            "只处理带文字层的 PDF。原文件保持不变，仅为有匹配结果的文件生成 *_marked.pdf。\n"
+            "底纹矩形和边框使用完全相同的范围，并以关键词文字中心为中心。\n"
+            "最终宽度 = 大小 × 放大倍数；最终高度 = 最终宽度 ÷ 长宽比。"
+        )
+        ttk.Label(parent, text=text, justify="left", anchor="nw", wraplength=850).grid(sticky="nw")
+
+    def _build_log_area(self) -> None:
+        frame = ttk.LabelFrame(self.root, text="运行日志与实时输出", padding=8)
+        frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=6)
+        frame.grid_columnconfigure(0, weight=1)
+        frame.grid_rowconfigure(0, weight=1)
+        self.log_text = tk.Text(frame, height=12, wrap="word", state="disabled", font=("Consolas", 10))
+        self.log_text.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.log_text.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.log_text.configure(yscrollcommand=scrollbar.set)
+        self.log_text.tag_configure("INFO", foreground="#1f2937")
+        self.log_text.tag_configure("WARNING", foreground="#b45309")
+        self.log_text.tag_configure("ERROR", foreground="#b42318")
+        self.log_text.tag_configure("SUCCESS", foreground="#067647")
+        ttk.Button(frame, text="清空日志", command=self._clear_log).grid(row=1, column=0, sticky="e", pady=(6, 0))
+
+    def _build_status_area(self) -> None:
+        frame = ttk.Frame(self.root, padding=(10, 4, 10, 10))
+        frame.grid(row=2, column=0, sticky="ew")
+        frame.grid_columnconfigure(0, weight=1)
+        self.progress = ttk.Progressbar(frame, mode="determinate")
+        self.progress.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 5))
+        ttk.Label(frame, textvariable=self.status_var, width=12).grid(row=1, column=0, sticky="w")
+        ttk.Label(frame, textvariable=self.current_var).grid(row=1, column=1, sticky="w")
+        ttk.Label(frame, textvariable=self.elapsed_var, width=10).grid(row=1, column=2, padx=10)
+        environment = f"Python {platform.python_version()} / Tk {tk.TkVersion}"
+        ttk.Label(frame, text=environment, foreground="#667085").grid(row=1, column=3, sticky="e")
+
+    def _browse_keyword_file(self) -> None:
+        path = filedialog.askopenfilename(
+            parent=self.root,
+            title="选择关键词文件",
+            filetypes=(("关键词文件", "*.xlsx *.csv"), ("Excel", "*.xlsx"), ("CSV", "*.csv"), ("所有文件", "*.*")),
+        )
+        if path:
+            self.keyword_file_var.set(path)
+            self._refresh_structure()
+
+    def _browse_pdf_dir(self) -> None:
+        path = filedialog.askdirectory(parent=self.root, title="选择 PDF 输入目录")
+        if path:
+            self.pdf_dir_var.set(path)
+
+    def _browse_output_dir(self) -> None:
+        path = filedialog.askdirectory(parent=self.root, title="选择输出目录")
+        if path:
+            self.output_dir_var.set(path)
+
+    def _clear_output_directory(self) -> None:
+        """经用户确认后清空输出目录，但保留目录本身。"""
+        try:
+            output_dir = resolve_path(self.context.project_root, self.output_dir_var.get())
+            pdf_dir = resolve_path(self.context.project_root, self.pdf_dir_var.get())
+            keyword_file = resolve_path(self.context.project_root, self.keyword_file_var.get())
+            protected = (self.context.project_root, Path.home(), pdf_dir, keyword_file)
+            validate_clear_target(output_dir, protected)
+            summary = inspect_directory_contents(output_dir)
+            if not output_dir.exists():
+                messagebox.showinfo("清空输出目录", f"输出目录不存在，无需清理：\n{output_dir}", parent=self.root)
+                return
+            if summary.file_count == 0 and summary.directory_count == 0:
+                messagebox.showinfo("清空输出目录", f"输出目录已经为空：\n{output_dir}", parent=self.root)
+                return
+            size_mb = summary.total_bytes / (1024 * 1024)
+            confirmed = messagebox.askyesno(
+                "确认清空输出目录",
+                f"即将永久删除以下目录中的全部内容：\n\n{output_dir}\n\n"
+                f"文件：{summary.file_count} 个\n子目录：{summary.directory_count} 个\n"
+                f"总大小：{size_mb:.2f} MB\n\n此操作不可撤销，是否继续？",
+                icon="warning",
+                parent=self.root,
+            )
+            if not confirmed:
+                self._append_log("INFO", "已取消清空输出目录。")
+                return
+            removed = clear_directory_contents(output_dir, protected)
+            self._append_log(
+                "SUCCESS",
+                f"已清空输出目录：{output_dir}（删除 {removed.file_count} 个文件、{removed.directory_count} 个子目录）",
+            )
+            messagebox.showinfo("清理完成", f"输出目录已清空：\n{output_dir}", parent=self.root)
+        except Exception as exc:
+            self._append_log("ERROR", f"清空输出目录失败：{exc}")
+            messagebox.showerror("清空失败", str(exc), parent=self.root)
+
+    def _refresh_structure(self) -> None:
+        try:
+            path = resolve_path(self.context.project_root, self.keyword_file_var.get())
+            info = inspect_keyword_source(path)
+            self.available_sheets = info.sheets
+            if info.sheets:
+                self._append_log("SUCCESS", f"Excel 工作表：{', '.join(info.sheets)}")
+            else:
+                self._append_log("SUCCESS", f"CSV 列：{', '.join(info.columns)}")
+        except Exception as exc:
+            self._show_parameter_error(exc)
+
+    def _add_source(self) -> None:
+        dialog = SourceDialog(self.root, self.available_sheets)
+        self.root.wait_window(dialog)
+        if dialog.result:
+            self.sources.append(dialog.result)
+            self._populate_sources()
+
+    def _edit_source(self) -> None:
+        selection = self.source_tree.selection()
+        if not selection:
+            messagebox.showinfo("编辑来源", "请先选择一条 Excel 来源。", parent=self.root)
+            return
+        index = int(selection[0])
+        dialog = SourceDialog(self.root, self.available_sheets, self.sources[index])
+        self.root.wait_window(dialog)
+        if dialog.result:
+            self.sources[index] = dialog.result
+            self._populate_sources()
+
+    def _remove_source(self) -> None:
+        selection = self.source_tree.selection()
+        if not selection:
+            return
+        del self.sources[int(selection[0])]
+        self._populate_sources()
+
+    def _populate_sources(self) -> None:
+        for item in self.source_tree.get_children():
+            self.source_tree.delete(item)
+        for index, source in enumerate(self.sources):
+            self.source_tree.insert(
+                "",
+                "end",
+                iid=str(index),
+                values=(source.sheet_name, ", ".join(source.keyword_columns), source.pdf_name_column or ""),
+            )
+
+    def _choose_highlight_color(self) -> None:
+        color = colorchooser.askcolor(self.highlight_color_var.get(), title="选择底纹颜色", parent=self.root)[1]
+        if color:
+            self.highlight_color_var.set(color.upper())
+            self._sync_color_button(self.highlight_color_button, color)
+
+    def _choose_border_color(self) -> None:
+        color = colorchooser.askcolor(self.border_color_var.get(), title="选择边框颜色", parent=self.root)[1]
+        if color:
+            self.border_color_var.set(color.upper())
+            self._sync_color_button(self.border_color_button, color)
+
+    @staticmethod
+    def _sync_color_button(button: tk.Button, color: str) -> None:
+        """让颜色选择按钮显示当前颜色，并自动选择可读的文字颜色。"""
+        red, green, blue = (int(color[index : index + 2], 16) for index in (1, 3, 5))
+        foreground = "#000000" if red * 299 + green * 587 + blue * 114 >= 150000 else "#FFFFFF"
+        button.configure(
+            background=color,
+            activebackground=color,
+            foreground=foreground,
+            activeforeground=foreground,
+        )
+
+    def _collect_settings(self) -> MarkPdfsSettings:
+        try:
+            opacity = float(self.highlight_opacity_var.get())
+            width = float(self.border_width_var.get())
+            aspect_ratio = float(self.box_aspect_ratio_var.get())
+            box_size = float(self.box_size_var.get())
+            box_scale = float(self.box_scale_var.get())
+        except ValueError as exc:
+            raise ValueError("透明度、线宽、长宽比、大小和放大倍数必须是数字") from exc
+        if not 0 <= opacity <= 1:
+            raise ValueError("底纹透明度必须在 0 到 1 之间")
+        if width <= 0:
+            raise ValueError("边框线宽必须大于 0")
+        if aspect_ratio <= 0 or box_size <= 0 or box_scale <= 0:
+            raise ValueError("长宽比、大小和放大倍数必须大于 0")
+        highlight_enabled = self.highlight_enabled_var.get()
+        border_enabled = self.border_enabled_var.get()
+        if not highlight_enabled and not border_enabled:
+            raise ValueError("底纹和边框至少启用一项")
+        keyword_file = resolve_path(self.context.project_root, self.keyword_file_var.get())
+        excel_sources = tuple(self.sources) if keyword_file.suffix.casefold() == ".xlsx" else ()
+        if keyword_file.suffix.casefold() == ".xlsx" and not excel_sources:
+            raise ValueError("Excel 文件至少需要配置一条 Sheet/关键词列来源")
+        return self.context.mark_pdfs.with_overrides(
+            keyword_file=keyword_file,
+            pdf_dir=resolve_path(self.context.project_root, self.pdf_dir_var.get()),
+            output_dir=resolve_path(self.context.project_root, self.output_dir_var.get()),
+            recursive=self.recursive_var.get(),
+            excel_sources=excel_sources,
+            sheet_name="",
+            keyword_column="" if excel_sources else self.csv_keyword_var.get().strip(),
+            pdf_name_column=self.csv_pdf_var.get().strip() or None,
+            highlight_enabled=highlight_enabled,
+            highlight_color=parse_hex_color(self.highlight_color_var.get()),
+            highlight_opacity=opacity,
+            border_enabled=border_enabled,
+            border_color=parse_hex_color(self.border_color_var.get()),
+            border_width=width,
+            box_aspect_ratio=aspect_ratio,
+            box_size=box_size,
+            box_scale=box_scale,
+        )
+
+    def _preview(self) -> None:
+        try:
+            settings = self._collect_settings()
+            if settings.keyword_file.suffix.casefold() == ".xlsx":
+                keywords = read_excel_keywords(settings.keyword_file, settings.excel_sources, settings.pdf_name_column)
+            else:
+                keywords = read_keywords(
+                    settings.keyword_file,
+                    keyword_column=settings.keyword_column,
+                    pdf_name_column=settings.pdf_name_column,
+                )
+            pdfs = discover_pdfs(settings.pdf_dir, settings.output_dir, settings.recursive)
+            styles = []
+            if settings.highlight_enabled:
+                styles.append(f"底纹 {color_to_hex(settings.highlight_color)} / 透明度 {settings.highlight_opacity:g}")
+            if settings.border_enabled:
+                styles.append(f"边框 {color_to_hex(settings.border_color)} / 线宽 {settings.border_width:g}")
+            styles.append(
+                f"矩形 长宽比 {settings.box_aspect_ratio:g} / 大小 {settings.box_size:g}pt / "
+                f"放大 {settings.box_scale:g} 倍"
+            )
+            self._append_log(
+                "SUCCESS",
+                f"参数预览：{len(keywords)} 个关键词，{len(pdfs)} 个 PDF；{'；'.join(styles)}；输出到 {settings.output_dir}",
+            )
+        except Exception as exc:
+            self._show_parameter_error(exc)
+
+    def _start(self) -> None:
+        try:
+            settings = self._collect_settings()
+        except Exception as exc:
+            self._show_parameter_error(exc)
+            return
+        self.cancel_event.clear()
+        self.started_at = time.monotonic()
+        self.elapsed_var.set("00:00:00")
+        self.status_var.set("扫描")
+        self.current_var.set("正在读取关键词和 PDF")
+        self.progress.configure(value=0, maximum=1)
+        self._set_running(True)
+        self.worker = threading.Thread(target=self._worker_run, args=(settings,), daemon=True)
+        self.worker.start()
+        self._update_elapsed()
+
+    def _worker_run(self, settings: MarkPdfsSettings) -> None:
+        try:
+            result = run(
+                settings,
+                on_progress=lambda current, total, name: self.events.put(("progress", current, total, name)),
+                on_message=lambda level, text: self.events.put(("log", level, text)),
+                is_cancelled=self.cancel_event.is_set,
+            )
+            self.events.put(("done", result))
+        except Exception as exc:
+            logger.exception("GUI 任务执行失败")
+            self.events.put(("error", exc))
+
+    def _cancel(self) -> None:
+        if self.running:
+            self.cancel_event.set()
+            self.status_var.set("正在取消")
+            self.current_var.set("等待当前文件安全结束")
+            self.cancel_button.state(["disabled"])
+
+    def _poll_events(self) -> None:
+        try:
+            while True:
+                event = self.events.get_nowait()
+                kind = event[0]
+                if kind == "log":
+                    self._append_log(str(event[1]), str(event[2]))
+                elif kind == "progress":
+                    current, total, name = int(event[1]), int(event[2]), str(event[3])
+                    self.progress.configure(maximum=max(total, 1), value=current)
+                    self.status_var.set("运行")
+                    self.current_var.set(f"{current}/{total}  {name}")
+                elif kind == "done":
+                    self._finish_success(event[1])
+                elif kind == "error":
+                    self._finish_error(event[1])
+        except queue.Empty:
+            pass
+        if self.closing and not self.running:
+            self.root.destroy()
+            return
+        self.root.after(100, self._poll_events)
+
+    def _finish_success(self, result: ProcessingResult) -> None:
+        self._set_running(False)
+        self._set_elapsed()
+        if result.cancelled:
+            self.status_var.set("已取消")
+            self.current_var.set(f"已输出 {result.output_pdf_count} 个 PDF")
+            return
+        self.status_var.set("完成")
+        self.current_var.set(f"输出 {result.output_pdf_count} 个 PDF，匹配 {result.total_match_count} 处")
+        messagebox.showinfo(
+            "处理完成",
+            f"已输出 {result.output_pdf_count} 个 PDF\n匹配 {result.total_match_count} 处\n"
+            f"未命中 {len(result.unmatched_keywords)} 个\n失败 {len(result.failures)} 个\n\n报告：{result.report_path}",
+            parent=self.root,
+        )
+
+    def _finish_error(self, error: object) -> None:
+        self._set_running(False)
+        self._set_elapsed()
+        self.status_var.set("失败")
+        self.current_var.set(str(error))
+        self._append_log("ERROR", f"任务失败：{error}")
+        messagebox.showerror("任务失败", str(error), parent=self.root)
+
+    def _set_running(self, running: bool) -> None:
+        self.running = running
+        for widget in self.input_widgets:
+            if isinstance(widget, ttk.Widget):
+                widget.state(["disabled"] if running else ["!disabled"])
+            else:
+                widget.configure(state="disabled" if running else "normal")
+        self.start_button.state(["disabled"] if running else ["!disabled"])
+        self.cancel_button.state(["!disabled"] if running else ["disabled"])
+
+    def _update_elapsed(self) -> None:
+        if not self.running:
+            return
+        self._set_elapsed()
+        self.root.after(500, self._update_elapsed)
+
+    def _set_elapsed(self) -> None:
+        elapsed = max(0, int(time.monotonic() - self.started_at)) if self.started_at else 0
+        hours, remainder = divmod(elapsed, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        self.elapsed_var.set(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
+
+    def _append_log(self, level: str, text: str) -> None:
+        level = level if level in {"INFO", "WARNING", "ERROR", "SUCCESS"} else "INFO"
+        stamp = time.strftime("%H:%M:%S")
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", f"{stamp} [{level}] {text}\n", level)
+        lines = int(self.log_text.index("end-1c").split(".")[0])
+        if lines > MAX_LOG_LINES:
+            self.log_text.delete("1.0", f"{lines - MAX_LOG_LINES}.0")
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+    def _clear_log(self) -> None:
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.configure(state="disabled")
+
+    def _show_parameter_error(self, error: Exception) -> None:
+        self._append_log("ERROR", f"参数错误：{error}")
+        messagebox.showerror("参数错误", str(error), parent=self.root)
+
+    def _on_close(self) -> None:
+        if not self.running:
+            self.root.destroy()
+            return
+        if messagebox.askyesno("任务正在运行", "是否安全取消任务并在结束后关闭窗口？", parent=self.root):
+            self.closing = True
+            self._cancel()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--config-file", help="公开 YAML 配置文件，默认使用根目录 config.yaml")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    configure_utf8_stdio()
+    args = build_parser().parse_args(argv)
+    try:
+        context = bootstrap_context(__file__, args.config_file)
+        setup_logger(context.log_level)
+        root = tk.Tk()
+        PdfTextMarkerApp(root, context)
+        root.mainloop()
+        return 0
+    except Exception as exc:
+        logger.exception("GUI 启动失败")
+        try:
+            messagebox.showerror("启动失败", str(exc))
+        except tk.TclError:
+            print(f"GUI 启动失败: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

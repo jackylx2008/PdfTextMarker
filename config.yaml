@@ -1,0 +1,30 @@
+app:
+  log_level: "${LOG_LEVEL:-INFO}"
+
+flows:
+  mark_pdfs:
+    keyword_file: "${KEYWORD_FILE:-./input/keywords.xlsx}"
+    pdf_dir: "${PDF_DIR:-./input}"
+    output_dir: "${OUTPUT_DIR:-./output}"
+    recursive: true
+    # Excel 可配置多个工作表和关键词列；无表头时可直接使用列字母。
+    excel_sources:
+      - sheet_name: "PAU"
+        keyword_columns:
+          - "C"
+      - sheet_name: "AHU"
+        keyword_columns:
+          - "C"
+    # CSV 默认自动寻找 keyword 或“关键词”列；也可在此明确指定列名。
+    keyword_column: ""
+    pdf_name_column: ""
+    report_filename: "pdf_text_marker_report.html"
+    highlight_enabled: true
+    highlight_color: "#FFFF00"
+    highlight_opacity: 0.35
+    border_enabled: true
+    border_color: "#FF0000"
+    border_width: 1.25
+    box_aspect_ratio: 4.0
+    box_size: 40.0
+    box_scale: 1.0

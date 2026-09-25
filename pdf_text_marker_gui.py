@@ -371,7 +371,7 @@ class PdfTextMarkerApp:
         self._path_row(
             reference,
             0,
-            "左上角 L/1 轴网：",
+            "左上角轴网：",
             self.a3_top_left_reference_var,
             self._browse_a3_top_left_reference,
             file_path=True,
@@ -379,7 +379,7 @@ class PdfTextMarkerApp:
         self._path_row(
             reference,
             1,
-            "右下角图签：",
+            "右下特征（轴网+图签）：",
             self.a3_bottom_right_reference_var,
             self._browse_a3_bottom_right_reference,
             file_path=True,
@@ -473,7 +473,7 @@ class PdfTextMarkerApp:
             "底纹矩形和边框使用完全相同的范围，并以关键词文字中心为中心。\n"
             "最终宽度 = 大小 × 放大倍数；最终高度 = 最终宽度 ÷ 长宽比。\n\n"
             "AI 图框拆分 A3\n\n"
-            "用 L/1 轴网参考图定位左上角，用图签参考图定位右下角，并分别应用 X/Y 偏移。\n"
+            "用左上轴网交点定位左上角；右下结合黄色框轴网圆圈与相邻图签定位，不限定具体轴号。\n"
             "识别页面方向后先旋正为横向，再左右拆成两个 A3 页面。\n"
             "AI 只分析预览图；输出直接裁切原 PDF，尽量保留矢量文字与线条。"
         )
@@ -540,7 +540,7 @@ class PdfTextMarkerApp:
     def _browse_a3_top_left_reference(self) -> None:
         path = filedialog.askopenfilename(
             parent=self.root,
-            title="选择左上角 L/1 轴网参考截图",
+            title="选择左上角轴网参考截图",
             filetypes=(("PNG 图片", "*.png"), ("所有文件", "*.*")),
         )
         if path:
@@ -549,7 +549,7 @@ class PdfTextMarkerApp:
     def _browse_a3_bottom_right_reference(self) -> None:
         path = filedialog.askopenfilename(
             parent=self.root,
-            title="选择右下角图签参考截图",
+            title="选择右下轴网与图签参考截图",
             filetypes=(("PNG 图片", "*.png"), ("所有文件", "*.*")),
         )
         if path:
@@ -742,7 +742,7 @@ class PdfTextMarkerApp:
         bottom_right_reference = resolve_path(self.context.project_root, self.a3_bottom_right_reference_var.get())
         if input_dir == output_dir:
             raise ValueError("A3 输出目录不能与 PDF 输入目录相同")
-        references = (("左上角 L/1 轴网", top_left_reference), ("右下角图签", bottom_right_reference))
+        references = (("左上角轴网", top_left_reference), ("右下轴网+图签", bottom_right_reference))
         for label, path in references:
             if not path.is_file():
                 raise FileNotFoundError(f"{label}参考截图不存在：{path}")

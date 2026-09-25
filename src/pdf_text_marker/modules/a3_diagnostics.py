@@ -15,6 +15,7 @@ from pdf_text_marker.modules.local_vision_client import NormalizedBounds, PageLa
 
 TOP_LEFT_COLOR = (0.0, 0.75, 0.2)
 TITLE_BLOCK_COLOR = (0.95, 0.1, 0.1)
+TITLE_CONTEXT_COLOR = (1.0, 0.55, 0.0)
 FINAL_RECT_COLOR = (0.8, 0.0, 0.85)
 SPLIT_COLOR = (0.0, 0.55, 0.9)
 
@@ -44,6 +45,16 @@ def create_bounds_diagnostic(
     title_block = rotate_normalized_bounds(analysis.title_block_bounds, analysis.rotation)
     top_left_rect = _normalized_to_rect(top_left, page.rect)
     title_block_rect = _normalized_to_rect(title_block, page.rect)
+    bottom_right_axis_rect = (
+        _normalized_to_rect(rotate_normalized_bounds(analysis.bottom_right_axis_bounds, analysis.rotation), page.rect)
+        if analysis.bottom_right_axis_bounds is not None
+        else None
+    )
+    bottom_axis_rect = (
+        _normalized_to_rect(rotate_normalized_bounds(analysis.bottom_axis_bounds, analysis.rotation), page.rect)
+        if analysis.bottom_axis_bounds is not None
+        else None
+    )
     left_axis_rect = (
         _normalized_to_rect(rotate_normalized_bounds(analysis.left_axis_bounds, analysis.rotation), page.rect)
         if analysis.left_axis_bounds is not None
@@ -71,6 +82,8 @@ def create_bounds_diagnostic(
         bottom_right_offset_y_mm,
         analysis.left_axis_bounds,
         analysis.top_axis_bounds,
+        analysis.bottom_right_axis_bounds,
+        analysis.bottom_axis_bounds,
     )
     final_rect = fitz.Rect(
         effective.x0 / oriented_source_rect.width * page.rect.width,
@@ -83,14 +96,81 @@ def create_bounds_diagnostic(
     if left_axis_rect is not None and top_axis_rect is not None:
         page.draw_rect(left_axis_rect, color=TOP_LEFT_COLOR, width=line_width, overlay=True)
         page.draw_rect(top_axis_rect, color=TOP_LEFT_COLOR, width=line_width, overlay=True)
-        anchor = fitz.Point(
-            (top_axis_rect.x0 + top_axis_rect.x1) / 2,
+        left_axis_center = fitz.Point(
+            (left_axis_rect.x0 + left_axis_rect.x1) / 2,
             (left_axis_rect.y0 + left_axis_rect.y1) / 2,
+        )
+        top_axis_center = fitz.Point(
+            (top_axis_rect.x0 + top_axis_rect.x1) / 2,
+            (top_axis_rect.y0 + top_axis_rect.y1) / 2,
+        )
+        anchor = fitz.Point(
+            top_axis_center.x,
+            left_axis_center.y,
+        )
+        page.draw_line(
+            left_axis_center,
+            anchor,
+            color=TOP_LEFT_COLOR,
+            width=max(1.5, line_width * 0.55),
+            dashes="5 4",
+            overlay=True,
+        )
+        page.draw_line(
+            top_axis_center,
+            anchor,
+            color=TOP_LEFT_COLOR,
+            width=max(1.5, line_width * 0.55),
+            dashes="5 4",
+            overlay=True,
         )
     else:
         page.draw_rect(top_left_rect, color=TOP_LEFT_COLOR, width=line_width, overlay=True)
         anchor = fitz.Point(top_left_rect.x0, top_left_rect.y0)
-    page.draw_rect(title_block_rect, color=TITLE_BLOCK_COLOR, width=line_width, overlay=True)
+    if bottom_right_axis_rect is not None:
+        page.draw_rect(
+            title_block_rect,
+            color=TITLE_CONTEXT_COLOR,
+            width=max(1.5, line_width * 0.6),
+            dashes="6 4",
+            overlay=True,
+        )
+        page.draw_rect(bottom_right_axis_rect, color=TITLE_BLOCK_COLOR, width=line_width, overlay=True)
+        if bottom_axis_rect is not None:
+            page.draw_rect(bottom_axis_rect, color=TITLE_BLOCK_COLOR, width=line_width, overlay=True)
+            right_axis_center = fitz.Point(
+                (bottom_right_axis_rect.x0 + bottom_right_axis_rect.x1) / 2,
+                (bottom_right_axis_rect.y0 + bottom_right_axis_rect.y1) / 2,
+            )
+            bottom_axis_center = fitz.Point(
+                (bottom_axis_rect.x0 + bottom_axis_rect.x1) / 2,
+                (bottom_axis_rect.y0 + bottom_axis_rect.y1) / 2,
+            )
+            right_anchor = fitz.Point(bottom_axis_center.x, right_axis_center.y)
+            page.draw_line(
+                right_anchor,
+                fitz.Point(right_axis_center.x, right_anchor.y),
+                color=TITLE_BLOCK_COLOR,
+                width=max(1.5, line_width * 0.55),
+                dashes="5 4",
+                overlay=True,
+            )
+            page.draw_line(
+                right_anchor,
+                fitz.Point(right_anchor.x, bottom_axis_center.y),
+                color=TITLE_BLOCK_COLOR,
+                width=max(1.5, line_width * 0.55),
+                dashes="5 4",
+                overlay=True,
+            )
+        else:
+            right_anchor = fitz.Point(
+                (bottom_right_axis_rect.x0 + bottom_right_axis_rect.x1) / 2,
+                (bottom_right_axis_rect.y0 + bottom_right_axis_rect.y1) / 2,
+            )
+    else:
+        page.draw_rect(title_block_rect, color=TITLE_BLOCK_COLOR, width=line_width, overlay=True)
+        right_anchor = fitz.Point(title_block_rect.x1, title_block_rect.y1)
     page.draw_rect(final_rect, color=FINAL_RECT_COLOR, width=line_width, overlay=True)
     middle_x = (final_rect.x0 + final_rect.x1) / 2
     page.draw_line(
@@ -102,7 +182,7 @@ def create_bounds_diagnostic(
         overlay=True,
     )
     _draw_anchor(page, anchor, TOP_LEFT_COLOR, line_width)
-    _draw_anchor(page, fitz.Point(title_block_rect.x1, title_block_rect.y1), TITLE_BLOCK_COLOR, line_width)
+    _draw_anchor(page, right_anchor, TITLE_BLOCK_COLOR, line_width)
     _draw_legend(page, analysis, top_left, title_block, final_rect, line_width)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -136,13 +216,42 @@ def _draw_legend(
     final_rect: fitz.Rect,
     line_width: float,
 ) -> None:
-    font_size = max(11.0, min(page.rect.width, page.rect.height) / 55.0)
-    panel = fitz.Rect(10, 10, min(page.rect.width - 10, 700), 20 + font_size * 5.2)
+    font_size = max(11.0, min(18.0, min(page.rect.width, page.rect.height) / 55.0))
+    panel_width = min(760.0, page.rect.width - 20)
+    panel_x0 = (page.rect.width - panel_width) / 2
+    panel = fitz.Rect(panel_x0, 10, panel_x0 + panel_width, 20 + font_size * 7.2)
     page.draw_rect(panel, color=(0.15, 0.15, 0.15), fill=(1.0, 1.0, 1.0), fill_opacity=0.88, width=1)
+    if analysis.left_axis_bounds is not None and analysis.top_axis_bounds is not None:
+        left_axis = rotate_normalized_bounds(analysis.left_axis_bounds, analysis.rotation)
+        top_axis = rotate_normalized_bounds(analysis.top_axis_bounds, analysis.rotation)
+        top_left_text = (
+            "GREEN  top-left intersection (top X + left Y): "
+            f"({(top_axis.x0 + top_axis.x1) / 2:.4f}, {(left_axis.y0 + left_axis.y1) / 2:.4f})"
+        )
+    else:
+        top_left_text = f"GREEN  top-left fallback: {_format_bounds(top_left)}"
     rows = (
         (f"AI BOUNDS DIAGNOSTIC | clockwise rotation: {analysis.rotation} deg", (0.1, 0.1, 0.1)),
-        (f"GREEN  top-left L/1: {_format_bounds(top_left)}", TOP_LEFT_COLOR),
-        (f"RED    bottom-right title block: {_format_bounds(title_block)}", TITLE_BLOCK_COLOR),
+        (top_left_text, TOP_LEFT_COLOR),
+        (
+            "RED    right-side axis (Y): "
+            + _format_bounds(
+                rotate_normalized_bounds(analysis.bottom_right_axis_bounds, analysis.rotation)
+                if analysis.bottom_right_axis_bounds is not None
+                else title_block
+            ),
+            TITLE_BLOCK_COLOR,
+        ),
+        (
+            "RED    bottom axis (X): "
+            + (
+                _format_bounds(rotate_normalized_bounds(analysis.bottom_axis_bounds, analysis.rotation))
+                if analysis.bottom_axis_bounds is not None
+                else "not detected"
+            ),
+            TITLE_BLOCK_COLOR,
+        ),
+        (f"ORANGE title block context: {_format_bounds(title_block)}", TITLE_CONTEXT_COLOR),
         (
             "MAGENTA final print area: "
             f"({final_rect.x0/page.rect.width:.4f}, {final_rect.y0/page.rect.height:.4f}, "
@@ -153,7 +262,7 @@ def _draw_legend(
     )
     y = 10 + font_size * 1.15
     for text, color in rows:
-        page.insert_text((18, y), text, fontsize=font_size, fontname="helv", color=color, overlay=True)
+        page.insert_text((panel.x0 + 8, y), text, fontsize=font_size, fontname="helv", color=color, overlay=True)
         y += font_size
 
 

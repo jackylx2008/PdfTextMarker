@@ -85,6 +85,8 @@ def split_pdf_to_a3(
                     bottom_right_offset_y_mm,
                     analysis.left_axis_bounds,
                     analysis.top_axis_bounds,
+                    analysis.bottom_right_axis_bounds,
+                    analysis.bottom_axis_bounds,
                 )
                 clips = split_effective_rect(effective, overlap_mm)
                 for clip in clips:
@@ -158,8 +160,10 @@ def effective_rect_from_analysis(
     offset_y_mm: float,
     left_axis_bounds: NormalizedBounds | None = None,
     top_axis_bounds: NormalizedBounds | None = None,
+    bottom_right_axis_bounds: NormalizedBounds | None = None,
+    bottom_axis_bounds: NormalizedBounds | None = None,
 ) -> fitz.Rect:
-    """用左上轴网和右下图签两个特征锚点构造最终打印范围。"""
+    """用左上与右下的两个轴网交点构造最终打印范围。"""
     rotated_top_left = rotate_normalized_bounds(top_left_feature_bounds, rotation)
     rotated_title_block = rotate_normalized_bounds(title_block_bounds, rotation)
     if left_axis_bounds is not None and top_axis_bounds is not None:
@@ -170,8 +174,19 @@ def effective_rect_from_analysis(
         anchor_x, anchor_y = rotated_top_left.x0, rotated_top_left.y0
     x0 = page_rect.x0 + anchor_x * page_rect.width + top_left_offset_x_mm * MM_TO_PT
     y0 = page_rect.y0 + anchor_y * page_rect.height + top_left_offset_y_mm * MM_TO_PT
-    x1 = page_rect.x0 + rotated_title_block.x1 * page_rect.width + offset_x_mm * MM_TO_PT
-    y1 = page_rect.y0 + rotated_title_block.y1 * page_rect.height + offset_y_mm * MM_TO_PT
+    if bottom_right_axis_bounds is not None:
+        rotated_bottom_right = rotate_normalized_bounds(bottom_right_axis_bounds, rotation)
+        rotated_bottom_axis = (
+            rotate_normalized_bounds(bottom_axis_bounds, rotation)
+            if bottom_axis_bounds is not None
+            else rotated_bottom_right
+        )
+        right_anchor_x = (rotated_bottom_axis.x0 + rotated_bottom_axis.x1) / 2
+        right_anchor_y = (rotated_bottom_right.y0 + rotated_bottom_right.y1) / 2
+    else:
+        right_anchor_x, right_anchor_y = rotated_title_block.x1, rotated_title_block.y1
+    x1 = page_rect.x0 + right_anchor_x * page_rect.width + offset_x_mm * MM_TO_PT
+    y1 = page_rect.y0 + right_anchor_y * page_rect.height + offset_y_mm * MM_TO_PT
     x0 = max(page_rect.x0, min(page_rect.x1 - 1, x0))
     y0 = max(page_rect.y0, min(page_rect.y1 - 1, y0))
     x1 = min(page_rect.x1, max(x0 + 1, x1))

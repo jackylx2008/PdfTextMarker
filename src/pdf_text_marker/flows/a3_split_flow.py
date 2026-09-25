@@ -33,7 +33,7 @@ def run(
         raise NotADirectoryError(f"PDF 输入目录不存在：{settings.input_dir}")
     references = (
         ("左上角 L/1 轴网", settings.top_left_reference_image),
-        ("右下角图签", settings.bottom_right_reference_image),
+        ("右下角组合特征", settings.bottom_right_reference_image),
     )
     for label, path in references:
         if not path.is_file():
@@ -54,7 +54,7 @@ def run(
     message(
         "INFO",
         f"特征参考图：左上角 {settings.top_left_reference_image.name}；"
-        f"右下角 {settings.bottom_right_reference_image.name}",
+        f"右下角轴网+图签 {settings.bottom_right_reference_image.name}",
     )
     message("INFO", f"发现 {len(pdfs)} 个待拆分 PDF")
     for index, pdf_path in enumerate(pdfs, start=1):

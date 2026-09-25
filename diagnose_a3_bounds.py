@@ -2,7 +2,7 @@
 
 用途：
   调用本地视觉服务分析单个 PDF 页面，在旋正后的预览图中标出轴网圆圈、
-  左上交点、右下图签、最终打印范围和左右 A3 分割线。
+  左上交点、右下轴网圆圈与图签、最终打印范围和左右 A3 分割线。
 
 配置文件：
   默认读取 config.yaml 和私有 common.env；API Key 只从配置加载，不接受界面输入。
@@ -103,6 +103,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"L 轴圆圈：{analysis.left_axis_bounds}")
     print(f"1 轴圆圈：{analysis.top_axis_bounds}")
     print(f"右下图签：{analysis.title_block_bounds}")
+    print(f"右侧字母轴网圆圈（提供 Y）：{analysis.bottom_right_axis_bounds}")
+    print(f"下方数字轴网圆圈（提供 X）：{analysis.bottom_axis_bounds}")
     print(f"诊断截图：{output_path}")
     return 0
 

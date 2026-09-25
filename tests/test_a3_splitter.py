@@ -112,6 +112,41 @@ def test_bottom_right_offset_expands_effective_print_range() -> None:
     assert rect.y1 == pytest.approx(560 + 5 * MM_TO_PT)
 
 
+def test_bottom_right_axis_center_replaces_title_block_corner() -> None:
+    rect = effective_rect_from_analysis(
+        NormalizedBounds(0.1, 0.1, 0.2, 0.2),
+        NormalizedBounds(0.80, 0.05, 0.99, 0.98),
+        0,
+        fitz.Rect(0, 0, 1000, 800),
+        0,
+        0,
+        10,
+        5,
+        bottom_right_axis_bounds=NormalizedBounds(0.72, 0.78, 0.76, 0.82),
+    )
+
+    assert rect.x1 == pytest.approx(740 + 10 * MM_TO_PT)
+    assert rect.y1 == pytest.approx(640 + 5 * MM_TO_PT)
+
+
+def test_bottom_right_anchor_combines_bottom_axis_x_and_right_axis_y() -> None:
+    rect = effective_rect_from_analysis(
+        NormalizedBounds(0.1, 0.1, 0.2, 0.2),
+        NormalizedBounds(0.80, 0.05, 0.99, 0.98),
+        0,
+        fitz.Rect(0, 0, 1000, 800),
+        0,
+        0,
+        0,
+        0,
+        bottom_right_axis_bounds=NormalizedBounds(0.92, 0.78, 0.94, 0.82),
+        bottom_axis_bounds=NormalizedBounds(0.86, 0.88, 0.88, 0.92),
+    )
+
+    assert rect.x1 == pytest.approx(870)
+    assert rect.y1 == pytest.approx(640)
+
+
 def test_l_and_1_axis_centers_form_top_left_anchor() -> None:
     rect = effective_rect_from_analysis(
         NormalizedBounds(0.01, 0.01, 0.05, 0.05),
@@ -191,6 +226,8 @@ def test_bounds_diagnostic_creates_annotated_rotated_png(tmp_path: Path) -> None
         NormalizedBounds(0.70, 0.60, 0.90, 0.90),
         NormalizedBounds(0.05, 0.10, 0.08, 0.14),
         NormalizedBounds(0.12, 0.04, 0.16, 0.08),
+        NormalizedBounds(0.82, 0.78, 0.86, 0.82),
+        NormalizedBounds(0.74, 0.86, 0.78, 0.90),
     )
     output = tmp_path / "diagnostic.png"
 

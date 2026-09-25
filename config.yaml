@@ -38,7 +38,7 @@ flows:
     ai_api_key: "${LLAMACPP_API_KEY:-}"
     top_left_reference_image: "${A3_TOP_LEFT_REFERENCE_IMAGE:-./input/识别图纸左上角.png}"
     bottom_right_reference_image: "${A3_BOTTOM_RIGHT_REFERENCE_IMAGE:-./input/识别图纸右下角.png}"
-    preview_max_pixels: 1600
+    preview_max_pixels: 2400
     top_left_offset_x_mm: 0.0
     top_left_offset_y_mm: 0.0
     bottom_right_offset_x_mm: 0.0

@@ -51,7 +51,7 @@ class A3SplitSettings:
     ai_api_key: str = ""
     top_left_reference_image: Path = Path("input/识别图纸左上角.png")
     bottom_right_reference_image: Path = Path("input/识别图纸右下角.png")
-    preview_max_pixels: int = 1600
+    preview_max_pixels: int = 2400
     top_left_offset_x_mm: float = 0.0
     top_left_offset_y_mm: float = 0.0
     bottom_right_offset_x_mm: float = 0.0
@@ -135,7 +135,7 @@ def bootstrap_context(entry_file: str | Path, config_file: str | Path | None = N
                 )
             ),
         ),
-        preview_max_pixels=int(a3_flow.get("preview_max_pixels", 1600)),
+        preview_max_pixels=int(a3_flow.get("preview_max_pixels", 2400)),
         top_left_offset_x_mm=float(a3_flow.get("top_left_offset_x_mm", 0.0)),
         top_left_offset_y_mm=float(a3_flow.get("top_left_offset_y_mm", 0.0)),
         bottom_right_offset_x_mm=float(a3_flow.get("bottom_right_offset_x_mm", 0.0)),
